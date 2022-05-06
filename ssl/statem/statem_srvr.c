@@ -1461,6 +1461,9 @@ MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt)
                  SSL_R_LENGTH_TOO_SHORT);
         goto err;
     }
+    
+    // FAKESSL ja3 reader, field 1/5 (version)
+    FAKESSL_SSL_update_ja3_list_part(s, clienthello->legacy_version, 0);
 
     /* Parse the message and load client random. */
     if (clienthello->isv2) {

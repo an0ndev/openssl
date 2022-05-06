@@ -593,6 +593,11 @@ int tls_collect_extensions(SSL *s, PACKET *packet, unsigned int context,
                      SSL_R_BAD_EXTENSION);
             goto err;
         }
+    
+    
+        // FAKESSL ja3 reader, field 3/5 (list of extensions)
+        FAKESSL_SSL_update_ja3_list_part(s, type, 2);
+    
         /*
          * Verify this extension is allowed. We only check duplicates for
          * extensions that we recognise. We also have a special case for the
@@ -708,7 +713,17 @@ int tls_parse_extension(SSL *s, TLSEXT_INDEX idx, int context,
     if (idx < OSSL_NELEM(ext_defs)) {
         /* We are handling a built-in extension */
         const EXTENSION_DEFINITION *extdef = &ext_defs[idx];
-
+    
+        // FAKESSL ja3 reader, field 4/5 (supported groups)
+        if (currext->type == TLSEXT_TYPE_supported_groups) {
+            FAKESSL_SSL_add_supported_groups_to_ja3(s, &currext->data);
+        }
+    
+        // FAKESSL ja3 reader, field 5/5 (EC point formats)
+        if (currext->type == TLSEXT_TYPE_ec_point_formats) {
+            FAKESSL_SSL_add_ec_point_formats_to_ja3(s, &currext->data);
+        }
+        
         /* Check if extension is defined for our protocol. If not, skip */
         if (!extension_is_relevant(s, extdef->context, context))
             return 1;

@@ -17,7 +17,7 @@ EXT_RETURN tls_construct_ctos_renegotiate(SSL *s, WPACKET *pkt,
                                           size_t chainidx)
 {
     /* Add RI if renegotiating */
-    if (!s->renegotiate)
+    if (!s->renegotiate) {
 #ifdef FAKESSL_RFC5746_AS_EXTENSION
         if (!WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_renegotiate)
             || !WPACKET_start_sub_packet_u16(pkt)
@@ -32,6 +32,7 @@ EXT_RETURN tls_construct_ctos_renegotiate(SSL *s, WPACKET *pkt,
 #else
         return EXT_RETURN_NOT_SENT;
 #endif
+    }
 
     if (!WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_renegotiate)
             || !WPACKET_start_sub_packet_u16(pkt)

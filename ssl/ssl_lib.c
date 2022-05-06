@@ -850,6 +850,12 @@ SSL *SSL_new(SSL_CTX *ctx)
                                         ctx->ct_validation_callback_arg))
         goto err;
 #endif
+    
+    for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+        s->ja3_parts [ja3_part] = OPENSSL_zalloc (1);
+        if (s->ja3_parts [ja3_part] == NULL)
+            goto err;
+    }
 
     return s;
  err:
@@ -1235,6 +1241,10 @@ void SSL_free(SSL *s)
 #endif
 
     CRYPTO_THREAD_lock_free(s->lock);
+
+    for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+        OPENSSL_free (s->ja3_parts [ja3_part]);
+    }
 
     OPENSSL_free(s);
 }
@@ -2097,6 +2107,104 @@ int SSL_shutdown(SSL *s)
         return -1;
     }
 }
+
+void FAKESSL_SSL_update_ja3_part(SSL *s, char* new_part, int num)
+{
+    OPENSSL_free(s->ja3_parts[num]);
+    s->ja3_parts[num] = OPENSSL_malloc(strlen(new_part) + 1);
+    strcpy(s->ja3_parts[num], new_part);
+}
+void FAKESSL_SSL_update_ja3_list_part(SSL *s, unsigned short new_list_item, int part_index)
+{
+    char item_str[6]; // max "65535\0"
+    snprintf(item_str, 6, "%i", new_list_item);
+    int item_str_len = strlen(item_str);
+    char *current_part = s->ja3_parts[part_index];
+    int current_part_len = strlen(current_part);
+    if (current_part_len == 0) {
+        FAKESSL_SSL_update_ja3_part(s, item_str, part_index);
+    } else {
+        char *new_part = OPENSSL_malloc(current_part_len + 1 /* for separator */ + item_str_len + 1 /* null terminator */);
+        memcpy(new_part, current_part, current_part_len);
+        new_part[current_part_len] = '-';
+        strcpy(new_part + current_part_len + 1, item_str);
+        
+        OPENSSL_free(s->ja3_parts[part_index]);
+        s->ja3_parts[part_index] = new_part;
+    }
+}
+
+void* FAKESSL_SSL_get_ja3(SSL *s)
+{
+    int ja3_str_len = 1 + 4; // null terminator and four comma separators
+    for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+        ja3_str_len += strlen (s->ja3_parts[ja3_part]);
+    }
+    char* ja3_str = OPENSSL_zalloc (ja3_str_len);
+    if (ja3_str == NULL) return NULL;
+    int part_offset = 0;
+    for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+        strcpy (ja3_str + part_offset,s->ja3_parts [ja3_part]);
+        
+        part_offset += strlen (s->ja3_parts [ja3_part]);
+        if (ja3_part < 4) {
+            ja3_str [part_offset] = ',';
+            part_offset += 1;
+        }
+    }
+    return (void*) ja3_str;
+}
+void FAKESSL_SSL_add_supported_groups_to_ja3(SSL *s, PACKET* container)
+{
+    unsigned char* packet_head;
+    size_t packet_len;
+    if (PACKET_memdup (container, &packet_head, &packet_len) < 1)
+        return;
+    PACKET container_copy;
+    if (PACKET_buf_init (&container_copy, packet_head, packet_len) < 1)
+        return;
+    PACKET supported_groups_list;
+    PACKET_as_length_prefixed_2(&container_copy, &supported_groups_list);
+    
+    unsigned char *supported_groups_head = NULL;
+    size_t supported_groups_count;
+    if (PACKET_memdup (&supported_groups_list, &supported_groups_head, &supported_groups_count) < 1)
+        return;
+    supported_groups_count /= 2;
+    
+    for (size_t group_idx = 0; group_idx < supported_groups_count; group_idx++) {
+        char group_first_byte = *(supported_groups_head + (group_idx * 2));
+        char group_second_byte = *(supported_groups_head + (group_idx * 2) + 1);
+        uint16_t group = ((uint16_t) group_first_byte) << 8 | group_second_byte;
+        printf("group idx %i is %i\n", group_idx, group);
+        FAKESSL_SSL_update_ja3_list_part(s, group, 3);
+    }
+    
+    OPENSSL_free(supported_groups_head);
+    OPENSSL_free(packet_head);
+}
+void FAKESSL_SSL_add_ec_point_formats_to_ja3(SSL *s, PACKET* container)
+{
+    unsigned char* packet_head;
+    size_t packet_len;
+    if (PACKET_memdup (container, &packet_head, &packet_len) < 1)
+        return;
+    PACKET container_copy;
+    if (PACKET_buf_init (&container_copy, packet_head, packet_len) < 1)
+        return;
+    PACKET ec_point_format_list;
+    PACKET_as_length_prefixed_1(&container_copy, &ec_point_format_list);
+    
+    size_t format_count = PACKET_remaining(&ec_point_format_list);
+    unsigned char* format_head = PACKET_data(&ec_point_format_list);
+    for (size_t format_idx = 0; format_idx < format_count; format_idx++) {
+        char format = *(format_head + format_idx);
+        FAKESSL_SSL_update_ja3_list_part(s, format, 4);
+    }
+    
+    OPENSSL_free(packet_head);
+}
+
 
 int SSL_key_update(SSL *s, int updatetype)
 {
@@ -5477,6 +5585,10 @@ int bytes_to_cipher_list(SSL *s, PACKET *cipher_suites,
         /* For SSLv2-compat, ignore leading 0-byte. */
         c = ssl_get_cipher_by_char(s, sslv2format ? &cipher[1] : cipher, 1);
         if (c != NULL) {
+            // FAKESSL ja3 reader, field 2/5 (accepted ciphers)
+            uint16_t protocol_id = /* SSL_CIPHER_get_protocol_id */ c->id & 0xFFFF;
+            FAKESSL_SSL_update_ja3_list_part(s, protocol_id, 1);
+            
             if ((c->valid && !sk_SSL_CIPHER_push(sk, c)) ||
                 (!c->valid && !sk_SSL_CIPHER_push(scsvs, c))) {
                 if (fatal)

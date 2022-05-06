@@ -1479,6 +1479,9 @@ struct ssl_st {
      */
     const struct sigalg_lookup_st **shared_sigalgs;
     size_t shared_sigalgslen;
+    
+    // FAKESSL ADDITION
+    char* ja3_parts [5];
 };
 
 /*
@@ -2661,6 +2664,14 @@ void ssl_comp_free_compression_methods_int(void);
 
 /* ssl_mcnf.c */
 void ssl_ctx_system_config(SSL_CTX *ctx);
+
+
+
+void FAKESSL_SSL_update_ja3_part(SSL *s, char *new_part, int num);
+void *FAKESSL_SSL_get_ja3(SSL *s);
+void FAKESSL_SSL_update_ja3_list_part(SSL *s, unsigned short new_list_item, int part_index);
+void FAKESSL_SSL_add_supported_groups_to_ja3(SSL *s, PACKET* data);
+void FAKESSL_SSL_add_ec_point_formats_to_ja3(SSL *s, PACKET* data);
 
 # else /* OPENSSL_UNIT_TEST */
 
