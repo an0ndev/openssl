@@ -1211,7 +1211,10 @@ void SSL_free(SSL *s)
 #endif
     OPENSSL_free(s->ext.ocsp.resp);
     OPENSSL_free(s->ext.alpn);
+    OPENSSL_free(s->ext.alps);
     OPENSSL_free(s->ext.tls13_cookie);
+    OPENSSL_free(s->ext.cert_compression_algorithms);
+    OPENSSL_free(s->ext_order);
     if (s->clienthello != NULL)
         OPENSSL_free(s->clienthello->pre_proc_exts);
     OPENSSL_free(s->clienthello);
@@ -2108,13 +2111,136 @@ int SSL_shutdown(SSL *s)
     }
 }
 
-void FAKESSL_SSL_update_ja3_part(SSL *s, char* new_part, int num)
+/* client functions */
+static int fakessl_update_cipher_list_by_id(STACK_OF(SSL_CIPHER) **cipher_list_by_id, STACK_OF(SSL_CIPHER) *cipherstack);
+void FAKESSL_SSL_set_cipher_list(SSL *s, uint16_t *cipher_list, int num_ciphers)
+{
+    STACK_OF(SSL_CIPHER)* unsorted = sk_SSL_CIPHER_new_null();
+    
+    int available_tls13_cipher_count = sk_SSL_CIPHER_num(s->ctx->tls13_ciphersuites);
+    for (int available_tls13_cipher_idx = 0; available_tls13_cipher_idx < available_tls13_cipher_count; available_tls13_cipher_idx++) {
+        const SSL_CIPHER* available_tls13_cipher = sk_SSL_CIPHER_value(s->ctx->tls13_ciphersuites, available_tls13_cipher_idx);
+        uint16_t available_tls13_cipher_proto_id = SSL_CIPHER_get_protocol_id (available_tls13_cipher);
+        for (int req_cipher_idx = 0; req_cipher_idx < num_ciphers; req_cipher_idx++) {
+            uint16_t req_cipher_id = *(cipher_list + req_cipher_idx);
+            if (available_tls13_cipher_proto_id == req_cipher_id) {
+                sk_SSL_CIPHER_push(unsorted, available_tls13_cipher);
+                break;
+            }
+        }
+    }
+    
+    int available_cipher_count = s->method->num_ciphers();
+    for (int available_cipher_idx = 0; available_cipher_idx < available_cipher_count; available_cipher_idx++) {
+        const SSL_CIPHER* available_cipher = s->method->get_cipher(available_cipher_idx);
+        uint16_t available_cipher_proto_id = SSL_CIPHER_get_protocol_id(available_cipher);
+        for (int req_cipher_idx = 0; req_cipher_idx < num_ciphers; req_cipher_idx++) {
+            uint16_t req_cipher_id = *(cipher_list + req_cipher_idx);
+            if (available_cipher_proto_id == req_cipher_id) {
+                sk_SSL_CIPHER_push(unsorted, available_cipher);
+                break;
+            }
+        }
+    }
+    
+    STACK_OF(SSL_CIPHER)* sorted = sk_SSL_CIPHER_new_null();
+    
+    for (int req_cipher_idx = 0; req_cipher_idx < num_ciphers; req_cipher_idx++) {
+        uint16_t req_cipher_id = *(cipher_list + req_cipher_idx);
+        for (int unsorted_cipher_idx = 0; unsorted_cipher_idx < sk_SSL_CIPHER_num(unsorted); unsorted_cipher_idx++) {
+            const SSL_CIPHER* maybe_match = sk_SSL_CIPHER_value(unsorted, unsorted_cipher_idx);
+            if (SSL_CIPHER_get_protocol_id(maybe_match) == req_cipher_id) {
+                sk_SSL_CIPHER_push(sorted, maybe_match);
+                break;
+            }
+        }
+    }
+    
+    
+    sk_SSL_CIPHER_free(unsorted);
+    
+    sk_SSL_CIPHER_free(s->cipher_list);
+    s->cipher_list = sorted;
+    fakessl_update_cipher_list_by_id(&s->cipher_list_by_id, s->cipher_list);
+}
+
+void FAKESSL_SSL_set_groups_list(SSL *s, uint16_t *groups_list, size_t num_groups)
+{
+    OPENSSL_free(s->ext.supportedgroups);
+    s->ext.supportedgroups = OPENSSL_malloc(sizeof (uint16_t) * num_groups);
+    memcpy(s->ext.supportedgroups, groups_list, sizeof (uint16_t) * num_groups);
+    s->ext.supportedgroups_len = num_groups;
+}
+
+void FAKESSL_SSL_set_format_list(SSL *s, unsigned char *format_list, size_t num_formats)
+{
+    OPENSSL_free(s->ext.ecpointformats);
+    s->ext.ecpointformats = OPENSSL_malloc(sizeof (unsigned char) * num_formats);
+    memcpy(s->ext.ecpointformats, format_list, sizeof (unsigned char) * num_formats);
+    s->ext.ecpointformats_len = num_formats;
+}
+
+/* copied from ssl_ciph.c */
+static int fakessl_update_cipher_list_by_id(STACK_OF(SSL_CIPHER) **cipher_list_by_id,
+    STACK_OF(SSL_CIPHER) *cipherstack)
+    {
+    STACK_OF(SSL_CIPHER) *tmp_cipher_list = sk_SSL_CIPHER_dup(cipherstack);
+    
+    if (tmp_cipher_list == NULL) {
+    return 0;
+    }
+    
+    sk_SSL_CIPHER_free(*cipher_list_by_id);
+    *cipher_list_by_id = tmp_cipher_list;
+    
+    (void)sk_SSL_CIPHER_set_cmp_func(*cipher_list_by_id, ssl_cipher_ptr_id_cmp);
+    sk_SSL_CIPHER_sort(*cipher_list_by_id);
+    
+    return 1;
+}
+
+void FAKESSL_SSL_set_alps_protos(SSL *s, const unsigned char* protos, size_t protos_len)
+{
+    OPENSSL_free(s->ext.alps);
+    if (protos_len == 0 || protos == NULL) {
+        s->ext.alps = NULL;
+        s->ext.alps_len = 0;
+        return;
+    }
+    s->ext.alps = OPENSSL_memdup(protos, protos_len);
+    s->ext.alps_len = protos_len;
+}
+
+void FAKESSL_SSL_set_compress_certificates(SSL *s, int compress_certificates)
+{
+    static const uint16_t supported_cert_compression_algorithms[] = {1 /* zlib */};
+    OPENSSL_free(s->ext.cert_compression_algorithms);
+    if (compress_certificates) {
+        s->ext.cert_compression_algorithms = OPENSSL_memdup(&supported_cert_compression_algorithms, sizeof supported_cert_compression_algorithms);
+        s->ext.cert_compression_algorithms_len = sizeof (supported_cert_compression_algorithms) / sizeof (uint16_t);
+    } else {
+        s->ext.cert_compression_algorithms = NULL;
+        s->ext.cert_compression_algorithms_len = 0;
+    }
+}
+void FAKESSL_SSL_set_ext_order(SSL *s, uint16_t *ext_list, size_t num_exts)
+{
+    OPENSSL_free(s->ext_order);
+    s->ext_order = OPENSSL_malloc(sizeof (uint16_t) * num_exts);
+    memcpy(s->ext_order, ext_list, sizeof (uint16_t) * num_exts);
+    s->ext_order_len = num_exts;
+}
+
+
+/* server functions */
+
+void FAKESSL_SSL_update_ja3_part(SSL *s, const char* new_part, int num)
 {
     OPENSSL_free(s->ja3_parts[num]);
     s->ja3_parts[num] = OPENSSL_malloc(strlen(new_part) + 1);
     strcpy(s->ja3_parts[num], new_part);
 }
-void FAKESSL_SSL_update_ja3_list_part(SSL *s, unsigned short new_list_item, int part_index)
+void FAKESSL_SSL_update_ja3_list_part(SSL *s, const unsigned short new_list_item, int part_index)
 {
     char item_str[6]; // max "65535\0"
     snprintf(item_str, 6, "%i", new_list_item);
@@ -2134,53 +2260,136 @@ void FAKESSL_SSL_update_ja3_list_part(SSL *s, unsigned short new_list_item, int 
     }
 }
 
-void* FAKESSL_SSL_get_ja3(SSL *s)
+unsigned short GREASE_VALUES[] = {
+    0x0A0A, 0x1A1A, 0x2A2A, 0x3A3A, 0x4A4A, 0x5A5A, 0x6A6A, 0x7A7A,
+    0x8A8A, 0x9A9A, 0xAAAA, 0xBABA, 0xCACA, 0xDADA, 0xEAEA, 0xFAFA
+};
+int GREASE_VALUES_COUNT = sizeof GREASE_VALUES / sizeof (unsigned short);
+char* FAKESSL_SSL_get_ja3_part(SSL *s, int part_idx, int remove_grease)
 {
+    char* src_ja3_part = s->ja3_parts[part_idx];
+    char* ja3_part = OPENSSL_zalloc(strlen(src_ja3_part) + 1);
+    strcpy(ja3_part, src_ja3_part);
+    
+    if (!remove_grease || (part_idx < 1 || part_idx > 3 /* not cipher suites, extensions, or supported groups */)) {
+        return ja3_part;
+    }
+    
+    int add_dash = 0;
+    char* part_with_grease_values_removed = OPENSSL_zalloc(strlen(ja3_part) + 1);
+    char* current_value_start = ja3_part;
+    char* current_value_end = ja3_part;
+    int at_end = 0;
+    
+    char* pos_in_out_string = part_with_grease_values_removed;
+    
+    while (1) {
+        // find the string containing the current part
+        int current_value_len = 0;
+        while (1) {
+            char current_value_end_character = *current_value_end;
+            if (current_value_end_character == '-') {
+                break;
+            } else if (current_value_end_character == '\0') {
+                at_end = 1;
+                break;
+            }
+            current_value_end += 1;
+            current_value_len += 1;
+        }
+        
+        // parse the current value
+        char* current_value_buffer = OPENSSL_zalloc(current_value_len + 1);
+        memcpy(current_value_buffer, current_value_start, current_value_len);
+        unsigned short current_value = strtoul(current_value_buffer, NULL, /* base */ 10);
+        
+        // chuck if the current value is a GREASE value
+        int is_grease_value = 0;
+        for (int grease_value_idx = 0; grease_value_idx < GREASE_VALUES_COUNT; grease_value_idx++) {
+            unsigned short grease_value = GREASE_VALUES[grease_value_idx];
+            if (current_value == grease_value) {
+                is_grease_value = 1;
+                break;
+            }
+        }
+        
+        if (!is_grease_value) {
+            // append to the list
+            if (add_dash) {
+                *pos_in_out_string = '-';
+                pos_in_out_string++;
+            } else {
+                add_dash = 1;
+            }
+            memcpy(pos_in_out_string, current_value_buffer, current_value_len);
+            pos_in_out_string += current_value_len;
+        }
+        OPENSSL_free(current_value_buffer);
+        
+        if (at_end) break;
+        
+        current_value_start = current_value_end + 1;
+        current_value_end = current_value_start;
+    }
+    
+    *pos_in_out_string = '\0';
+    
+    OPENSSL_free(ja3_part);
+    
+    return part_with_grease_values_removed;
+}
+
+void* FAKESSL_SSL_get_ja3(SSL *s, int remove_grease)
+{
+    char *ja3_parts[5];
+    for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+        ja3_parts[ja3_part] = FAKESSL_SSL_get_ja3_part(s, ja3_part, remove_grease);
+    }
+    
     int ja3_str_len = 1 + 4; // null terminator and four comma separators
     for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
-        ja3_str_len += strlen (s->ja3_parts[ja3_part]);
+        ja3_str_len += strlen (ja3_parts[ja3_part]);
     }
     char* ja3_str = OPENSSL_zalloc (ja3_str_len);
-    if (ja3_str == NULL) return NULL;
+    if (ja3_str == NULL) {
+        for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+            OPENSSL_free(ja3_parts[ja3_part]);
+        }
+        return NULL;
+    }
     int part_offset = 0;
     for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
-        strcpy (ja3_str + part_offset,s->ja3_parts [ja3_part]);
+        strcpy (ja3_str + part_offset, ja3_parts [ja3_part]);
         
-        part_offset += strlen (s->ja3_parts [ja3_part]);
+        part_offset += strlen (ja3_parts [ja3_part]);
         if (ja3_part < 4) {
             ja3_str [part_offset] = ',';
             part_offset += 1;
         }
     }
+    for (int ja3_part = 0; ja3_part < 5; ja3_part++) {
+        OPENSSL_free(ja3_parts[ja3_part]);
+    }
     return (void*) ja3_str;
 }
 void FAKESSL_SSL_add_supported_groups_to_ja3(SSL *s, PACKET* container)
 {
-    unsigned char* packet_head;
+    unsigned char* packet_head = NULL;
     size_t packet_len;
     if (PACKET_memdup (container, &packet_head, &packet_len) < 1)
         return;
     PACKET container_copy;
-    if (PACKET_buf_init (&container_copy, packet_head, packet_len) < 1)
-        return;
+    if (!PACKET_buf_init (&container_copy, packet_head, packet_len)) return;
     PACKET supported_groups_list;
-    PACKET_as_length_prefixed_2(&container_copy, &supported_groups_list);
     
-    unsigned char *supported_groups_head = NULL;
-    size_t supported_groups_count;
-    if (PACKET_memdup (&supported_groups_list, &supported_groups_head, &supported_groups_count) < 1)
-        return;
-    supported_groups_count /= 2;
+    if (!PACKET_as_length_prefixed_2(&container_copy, &supported_groups_list)) return;
     
-    for (size_t group_idx = 0; group_idx < supported_groups_count; group_idx++) {
-        char group_first_byte = *(supported_groups_head + (group_idx * 2));
-        char group_second_byte = *(supported_groups_head + (group_idx * 2) + 1);
-        uint16_t group = ((uint16_t) group_first_byte) << 8 | group_second_byte;
-        printf("group idx %i is %i\n", group_idx, group);
+    uint16_t group;
+    while (1) {
+        if (!PACKET_get_net_2(&supported_groups_list, (unsigned int*) &group)) break;
         FAKESSL_SSL_update_ja3_list_part(s, group, 3);
     }
     
-    OPENSSL_free(supported_groups_head);
     OPENSSL_free(packet_head);
 }
 void FAKESSL_SSL_add_ec_point_formats_to_ja3(SSL *s, PACKET* container)
@@ -2196,9 +2405,9 @@ void FAKESSL_SSL_add_ec_point_formats_to_ja3(SSL *s, PACKET* container)
     PACKET_as_length_prefixed_1(&container_copy, &ec_point_format_list);
     
     size_t format_count = PACKET_remaining(&ec_point_format_list);
-    unsigned char* format_head = PACKET_data(&ec_point_format_list);
+    const unsigned char* format_head = PACKET_data(&ec_point_format_list);
     for (size_t format_idx = 0; format_idx < format_count; format_idx++) {
-        char format = *(format_head + format_idx);
+        const unsigned char format = *(format_head + format_idx);
         FAKESSL_SSL_update_ja3_list_part(s, format, 4);
     }
     

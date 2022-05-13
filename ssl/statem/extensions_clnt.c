@@ -1229,6 +1229,26 @@ EXT_RETURN tls_construct_ctos_post_handshake_auth(SSL *s, WPACKET *pkt,
 #endif
 }
 
+EXT_RETURN tls_construct_ctos_application_settings(SSL *s, WPACKET *pkt, unsigned int context,
+                                   X509 *x, size_t chainidx)
+{
+    if (s->ext.alps == NULL || !SSL_IS_FIRST_HANDSHAKE(s))
+        return EXT_RETURN_NOT_SENT;
+    
+    if (!WPACKET_put_bytes_u16(pkt,
+                               TLSEXT_TYPE_application_settings)
+        /* Sub-packet ALPS extension */
+        || !WPACKET_start_sub_packet_u16(pkt)
+        || !WPACKET_sub_memcpy_u16(pkt, s->ext.alps, s->ext.alps_len)
+        || !WPACKET_close(pkt)) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_CONSTRUCT_CTOS_ALPN,
+                 ERR_R_INTERNAL_ERROR);
+        return EXT_RETURN_FAIL;
+    }
+    
+    return EXT_RETURN_SENT;
+}
+
 
 /*
  * Parse the server's renegotiation binding and abort if it's not right

@@ -715,6 +715,8 @@ typedef enum tlsext_index_en {
     TLSEXT_IDX_early_data,
     TLSEXT_IDX_certificate_authorities,
     TLSEXT_IDX_padding,
+    TLSEXT_IDX_application_settings,
+    TLSEXT_IDX_compress_certificate,
     TLSEXT_IDX_psk,
     /* Dummy index - must always be the last entry */
     TLSEXT_IDX_num_builtins
@@ -1329,6 +1331,25 @@ struct ssl_st {
          */
         unsigned char *npn;
         size_t npn_len;
+        /*
+         * FAKESSL: Supported protocols for Application Settings in wire format
+         */
+        unsigned char *alps;
+        size_t alps_len;
+        
+        /*
+         * FAKESSL: Algorithms the peer can compress their certificates with
+         */
+        uint16_t *cert_compression_algorithms;
+        size_t cert_compression_algorithms_len;
+        /*
+         * FAKESSL: Algorithms we can compress our certificates with
+         */
+        uint16_t *peer_cert_compression_algorithms;
+        size_t peer_cert_compression_algorithms_len;
+        // Chosen based on the above values and which algorithms we implement
+        int outbound_compression_enabled;
+        uint16_t outbound_compression_algo;
 
         /* The available PSK key exchange modes */
         int psk_kex_mode;
@@ -1365,6 +1386,12 @@ struct ssl_st {
          */
         int tick_identity;
     } ext;
+    
+    /*
+     * FAKESSL: Custom order to send extensions in, by extension ID.
+     */
+    uint16_t *ext_order;
+    size_t ext_order_len;
 
     /*
      * Parsed form of the ClientHello, kept around across client_hello_cb
@@ -2665,11 +2692,18 @@ void ssl_comp_free_compression_methods_int(void);
 /* ssl_mcnf.c */
 void ssl_ctx_system_config(SSL_CTX *ctx);
 
+/* client functions */
+void FAKESSL_SSL_set_cipher_list(SSL *s, uint16_t *cipher_list, int num_ciphers);
+void FAKESSL_SSL_set_groups_list(SSL *s, uint16_t *groups_list, size_t num_groups);
+void FAKESSL_SSL_set_format_list(SSL *s, unsigned char *format_list, size_t num_formats);
+void FAKESSL_SSL_set_compress_certificate(SSL *s, int compress_certificate);
+void FAKESSL_SSL_set_ext_order(SSL *s, uint16_t *ext_list, size_t num_exts);
 
 
-void FAKESSL_SSL_update_ja3_part(SSL *s, char *new_part, int num);
-void *FAKESSL_SSL_get_ja3(SSL *s);
-void FAKESSL_SSL_update_ja3_list_part(SSL *s, unsigned short new_list_item, int part_index);
+/* server functions */
+void FAKESSL_SSL_update_ja3_part(SSL *s, const char *new_part, int num);
+void *FAKESSL_SSL_get_ja3(SSL *s, int remove_grease);
+void FAKESSL_SSL_update_ja3_list_part(SSL *s, const unsigned short new_list_item, int part_index);
 void FAKESSL_SSL_add_supported_groups_to_ja3(SSL *s, PACKET* data);
 void FAKESSL_SSL_add_ec_point_formats_to_ja3(SSL *s, PACKET* data);
 

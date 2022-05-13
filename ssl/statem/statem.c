@@ -13,6 +13,8 @@
 #include "statem_local.h"
 #include <assert.h>
 
+#include <zlib.h>
+
 /*
  * This file implements the SSL/TLS/DTLS state machines.
  *
@@ -969,4 +971,106 @@ int ossl_statem_export_early_allowed(SSL *s)
      */
     return s->ext.early_data == SSL_EARLY_DATA_ACCEPTED
            || (!s->server && s->ext.early_data != SSL_EARLY_DATA_NOT_SENT);
+}
+int tls_construct_compressed_certificate(SSL *s, WPACKET *pkt, tls_construct_certificate_func construct_func)
+{
+    BUF_MEM *uncompressed_buf = BUF_MEM_new();
+    WPACKET subpkt;
+    if (!WPACKET_init(&subpkt, uncompressed_buf)) {
+        BUF_MEM_free(uncompressed_buf);
+        return 0;
+    }
+    if (!construct_func(s, &subpkt)) {
+        WPACKET_cleanup(&subpkt);
+        BUF_MEM_free(uncompressed_buf);
+        return 0;
+    }
+    
+    size_t uncompressed_sz;
+    if (!WPACKET_get_length(&subpkt, &uncompressed_sz)) {
+        WPACKET_cleanup(&subpkt);
+        BUF_MEM_free(uncompressed_buf);
+        return 0;
+    }
+    
+    size_t max_compressed_sz = compressBound(uncompressed_sz);
+
+    char *compressed_buf = OPENSSL_malloc(max_compressed_sz);
+    if (compressed_buf == NULL) {
+        WPACKET_cleanup(&subpkt);
+        BUF_MEM_free(uncompressed_buf);
+        return 0;
+    }
+    
+    size_t compressed_sz = max_compressed_sz;
+    int compress_ret = compress((Bytef *) compressed_buf, &compressed_sz, (Bytef *) uncompressed_buf->data, uncompressed_sz);
+    if (compress_ret != Z_OK) {
+        WPACKET_cleanup(&subpkt);
+        BUF_MEM_free(uncompressed_buf);
+        return 0;
+    }
+    
+    if (!WPACKET_put_bytes_u16(pkt, 0x01 /* zlib */)
+        || !WPACKET_put_bytes_u24(pkt, uncompressed_sz)
+        || !WPACKET_sub_memcpy_u24(pkt, compressed_buf, compressed_sz)) {
+        WPACKET_cleanup(&subpkt);
+        BUF_MEM_free(uncompressed_buf);
+        return 0;
+    }
+    
+    
+    WPACKET_cleanup(&subpkt);
+    BUF_MEM_free(uncompressed_buf);
+    return 1;
+}
+MSG_PROCESS_RETURN tls_process_compressed_certificate(SSL *s, PACKET *pkt, tls_process_certificate_func process_func)
+{
+    unsigned int algo;
+    if (!PACKET_get_net_2(pkt, &algo))
+        return MSG_PROCESS_ERROR;
+    if (algo != 0x01 /* zlib */)
+        return MSG_PROCESS_ERROR;
+
+    unsigned long reported_uncompressed_sz;
+    if (!PACKET_get_net_3(pkt, &reported_uncompressed_sz))
+        return MSG_PROCESS_ERROR;
+
+    PACKET compressed_pkt;
+    if (!PACKET_get_length_prefixed_3(pkt, &compressed_pkt))
+        return MSG_PROCESS_ERROR;
+
+    const unsigned char *compressed_buf = PACKET_data(&compressed_pkt);
+    size_t compressed_sz = PACKET_remaining(&compressed_pkt);
+
+    
+    unsigned char *uncompressed_buf = OPENSSL_malloc(reported_uncompressed_sz);
+    if (uncompressed_buf == NULL)
+        return MSG_PROCESS_ERROR;
+
+    size_t uncompressed_sz = reported_uncompressed_sz;
+    int uncompress_ret = uncompress((Bytef *) uncompressed_buf, &uncompressed_sz, (Bytef *) compressed_buf, compressed_sz);
+    if (uncompress_ret != Z_OK) {
+        OPENSSL_free(uncompressed_buf);
+        return MSG_PROCESS_ERROR;
+    }
+    if (reported_uncompressed_sz != uncompressed_sz) {
+        OPENSSL_free(uncompressed_buf);
+        return MSG_PROCESS_ERROR;
+    }
+    
+    
+    
+    PACKET subpkt;
+    if (!PACKET_buf_init(&subpkt, uncompressed_buf, uncompressed_sz)) {
+        OPENSSL_free(uncompressed_buf);
+        return MSG_PROCESS_ERROR;
+    }
+    
+    if (process_func(s, &subpkt) == MSG_PROCESS_ERROR) {
+        OPENSSL_free(uncompressed_buf);
+        return MSG_PROCESS_ERROR;
+    }
+    
+    OPENSSL_free(uncompressed_buf);
+    return MSG_PROCESS_CONTINUE_READING;
 }

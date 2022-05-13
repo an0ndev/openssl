@@ -129,6 +129,10 @@ static int ossl_statem_client13_read_transition(SSL *s, int mt)
                 st->hand_state = TLS_ST_CR_CERT;
                 return 1;
             }
+            if (mt == SSL3_MT_COMPRESSED_CERTIFICATE) {
+                st->hand_state = TLS_ST_CR_COMP_CERT;
+                return 1;
+            }
         }
         break;
 
@@ -137,9 +141,14 @@ static int ossl_statem_client13_read_transition(SSL *s, int mt)
             st->hand_state = TLS_ST_CR_CERT;
             return 1;
         }
+        if (mt == SSL3_MT_COMPRESSED_CERTIFICATE) {
+            st->hand_state = TLS_ST_CR_COMP_CERT;
+            return 1;
+        }
         break;
 
     case TLS_ST_CR_CERT:
+    case TLS_ST_CR_COMP_CERT:
         if (mt == SSL3_MT_CERTIFICATE_VERIFY) {
             st->hand_state = TLS_ST_CR_CERT_VRFY;
             return 1;
@@ -275,6 +284,10 @@ int ossl_statem_client_read_transition(SSL *s, int mt)
                          & (SSL_aNULL | SSL_aSRP | SSL_aPSK))) {
                 if (mt == SSL3_MT_CERTIFICATE) {
                     st->hand_state = TLS_ST_CR_CERT;
+                    return 1;
+                }
+                if (mt == SSL3_MT_COMPRESSED_CERTIFICATE) {
+                    st->hand_state = TLS_ST_CR_COMP_CERT;
                     return 1;
                 }
             } else {
@@ -420,7 +433,7 @@ static WRITE_TRAN ossl_statem_client13_write_transition(SSL *s)
 
     case TLS_ST_CR_CERT_REQ:
         if (s->post_handshake_auth == SSL_PHA_REQUESTED) {
-            st->hand_state = TLS_ST_CW_CERT;
+            st->hand_state = s->ext.outbound_compression_enabled ? TLS_ST_CW_COMP_CERT : TLS_ST_CW_CERT;
             return WRITE_TRAN_CONTINUE;
         }
         /*
@@ -463,6 +476,7 @@ static WRITE_TRAN ossl_statem_client13_write_transition(SSL *s)
         return WRITE_TRAN_CONTINUE;
 
     case TLS_ST_CW_CERT:
+    case TLS_ST_CW_COMP_CERT:
         /* If a non-empty Certificate we also send CertificateVerify */
         st->hand_state = (s->s3->tmp.cert_req == 1) ? TLS_ST_CW_CERT_VRFY
                                                     : TLS_ST_CW_FINISHED;
@@ -568,12 +582,13 @@ WRITE_TRAN ossl_statem_client_write_transition(SSL *s)
 
     case TLS_ST_CR_SRVR_DONE:
         if (s->s3->tmp.cert_req)
-            st->hand_state = TLS_ST_CW_CERT;
+            st->hand_state = s->ext.outbound_compression_enabled ? TLS_ST_CW_COMP_CERT : TLS_ST_CW_CERT;
         else
             st->hand_state = TLS_ST_CW_KEY_EXCH;
         return WRITE_TRAN_CONTINUE;
 
     case TLS_ST_CW_CERT:
+    case TLS_ST_CW_COMP_CERT:
         st->hand_state = TLS_ST_CW_KEY_EXCH;
         return WRITE_TRAN_CONTINUE;
 
@@ -923,6 +938,11 @@ int ossl_statem_client_construct_message(SSL *s, WPACKET *pkt,
         *mt = SSL3_MT_CERTIFICATE;
         break;
 
+    case TLS_ST_CW_COMP_CERT:
+        *confunc = tls_construct_client_compressed_certificate;
+        *mt = SSL3_MT_COMPRESSED_CERTIFICATE;
+        break;
+
     case TLS_ST_CW_KEY_EXCH:
         *confunc = tls_construct_client_key_exchange;
         *mt = SSL3_MT_CLIENT_KEY_EXCHANGE;
@@ -973,6 +993,7 @@ size_t ossl_statem_client_max_message_size(SSL *s)
         return HELLO_VERIFY_REQUEST_MAX_LENGTH;
 
     case TLS_ST_CR_CERT:
+    case TLS_ST_CR_COMP_CERT:
         return s->max_cert_list;
 
     case TLS_ST_CR_CERT_VRFY:
@@ -1038,6 +1059,9 @@ MSG_PROCESS_RETURN ossl_statem_client_process_message(SSL *s, PACKET *pkt)
 
     case TLS_ST_CR_CERT:
         return tls_process_server_certificate(s, pkt);
+
+    case TLS_ST_CR_COMP_CERT:
+        return tls_process_server_compressed_certificate(s, pkt);
 
     case TLS_ST_CR_CERT_VRFY:
         return tls_process_cert_verify(s, pkt);
@@ -1836,6 +1860,7 @@ MSG_PROCESS_RETURN tls_process_server_certificate(SSL *s, PACKET *pkt)
             || !PACKET_get_net_3(pkt, &cert_list_len)
             || PACKET_remaining(pkt) != cert_list_len
             || PACKET_remaining(pkt) == 0) {
+        printf("cert_list_len %lu, PACKET_remaining(pkt) %zu\n", cert_list_len, PACKET_remaining(pkt));
         SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_F_TLS_PROCESS_SERVER_CERTIFICATE,
                  SSL_R_LENGTH_MISMATCH);
         goto err;
@@ -1983,6 +2008,10 @@ MSG_PROCESS_RETURN tls_process_server_certificate(SSL *s, PACKET *pkt)
     X509_free(x);
     sk_X509_pop_free(sk, X509_free);
     return ret;
+}
+MSG_PROCESS_RETURN tls_process_server_compressed_certificate(SSL *s, PACKET *pkt)
+{
+    return tls_process_compressed_certificate(s, pkt, &tls_process_server_certificate);
 }
 
 static int tls_process_ske_psk_preamble(SSL *s, PACKET *pkt)
@@ -3578,6 +3607,11 @@ int tls_construct_client_certificate(SSL *s, WPACKET *pkt)
 
     return 1;
 }
+int tls_construct_client_compressed_certificate(SSL *s, WPACKET *pkt)
+{
+    return tls_construct_compressed_certificate(s, pkt, &tls_construct_client_certificate);
+}
+
 
 int ssl3_check_cert_and_algorithm(SSL *s)
 {

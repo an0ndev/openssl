@@ -386,6 +386,21 @@ static const EXTENSION_DEFINITION ext_defs[] = {
         NULL, NULL, NULL, tls_construct_ctos_padding, NULL
     },
     {
+        /* FAKESSL addition */
+        TLSEXT_TYPE_application_settings,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ONLY,
+        NULL,
+        NULL, NULL, NULL, tls_construct_ctos_application_settings, NULL
+    },
+    {
+        /* FAKESSL addition */
+        TLSEXT_TYPE_compress_certificate,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ONLY | SSL_EXT_TLS1_3_CERTIFICATE_REQUEST,
+        NULL,
+        tls_parse_compress_certificate, tls_parse_compress_certificate, tls_construct_compress_certificate,
+        tls_construct_compress_certificate, NULL
+    },
+    {
         /* Required by the TLSv1.3 spec to always be the last extension */
         TLSEXT_TYPE_psk,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_SERVER_HELLO
@@ -853,8 +868,81 @@ int tls_construct_extensions(SSL *s, WPACKET *pkt, unsigned int context,
         /* SSLfatal() already called */
         return 0;
     }
+    
+    const EXTENSION_DEFINITION** ordered_ext_defs;
+    if ((context & SSL_EXT_CLIENT_HELLO) && s->ext_order != NULL) {
+        // Requested order to send extensions in:
+        // array of protocol IDs ("type" field of extension definition)
+        uint16_t *req_list = s->ext_order;
+        // Length of the array, in items
+        size_t req_list_len = s->ext_order_len;
+        
+        // Extensions part of the requested list, not ordered
+        const EXTENSION_DEFINITION** filtered_ext_defs = OPENSSL_malloc(sizeof (EXTENSION_DEFINITION*) * req_list_len);
+        // The rest of the extensions, in case there are side effects from applying them
+        const EXTENSION_DEFINITION** other_ext_defs = OPENSSL_malloc(sizeof (EXTENSION_DEFINITION*) * (OSSL_NELEM(ext_defs) - req_list_len));
+        
+        // Split all extensions into the two arrays, based on whether they're part of the requested list
+        size_t pos_in_filtered = 0;
+        size_t pos_in_other = 0;
+        for (size_t current_ext_def = 0; current_ext_def < OSSL_NELEM(ext_defs); current_ext_def++) {
+            const EXTENSION_DEFINITION* this_extension_def = ext_defs + current_ext_def;
+            
+            // Check to see if this extension is part of the requested list
+            int in_req_list = 0;
+            for (size_t req_list_pos = 0; req_list_pos < req_list_len; req_list_pos++) {
+                uint16_t req_list_item = *(req_list + req_list_pos);
+                if (this_extension_def->type == req_list_item) {
+                    in_req_list = 1;
+                    break;
+                }
+            }
+            
+            if (in_req_list) {
+                *(filtered_ext_defs + pos_in_filtered) = this_extension_def;
+                pos_in_filtered++;
+            } else {
+                *(other_ext_defs + pos_in_other) = this_extension_def;
+                pos_in_other++;
+            }
+        }
+        
+        // Sort extensions in the first array according to the requested list
+        const EXTENSION_DEFINITION** ordered_req_ext_defs = OPENSSL_malloc(sizeof (EXTENSION_DEFINITION*) * req_list_len);
+        // For each item in the requested list,
+        for (size_t req_list_pos = 0; req_list_pos < req_list_len; req_list_pos++) {
+            uint16_t req_list_item = *(req_list + req_list_pos);
+            // find its matching extension definition
+            for (size_t filtered_list_pos = 0; filtered_list_pos < req_list_len; filtered_list_pos++) {
+                const EXTENSION_DEFINITION* filtered_ext_def = *(filtered_ext_defs + filtered_list_pos);
+                if (filtered_ext_def->type == req_list_item) {
+                    // and place it in the sorted array
+                    ordered_req_ext_defs[req_list_pos] = filtered_ext_def;
+                    break;
+                }
+            }
+        }
+        OPENSSL_free(filtered_ext_defs);
+        
+        // Combine extensions from the sorted array of requested extensions and the array of other extensions
+        ordered_ext_defs = OPENSSL_malloc(sizeof (EXTENSION_DEFINITION*) * OSSL_NELEM(ext_defs));
+        memcpy(ordered_ext_defs, ordered_req_ext_defs, sizeof (EXTENSION_DEFINITION*) * req_list_len);
+        memcpy(ordered_ext_defs + req_list_len, other_ext_defs, sizeof (EXTENSION_DEFINITION*) * (OSSL_NELEM(ext_defs) - req_list_len));
+        OPENSSL_free(ordered_req_ext_defs);
+        OPENSSL_free(other_ext_defs);
+    } else {
+        // Place all extensions into the output list of extension definitions
+        ordered_ext_defs = OPENSSL_malloc(sizeof (EXTENSION_DEFINITION*) * OSSL_NELEM(ext_defs));
+        for (size_t current_ext_def = 0; current_ext_def < OSSL_NELEM(ext_defs); current_ext_def++) {
+            ordered_ext_defs[current_ext_def] = ext_defs + current_ext_def;
+        }
+    }
 
-    for (i = 0, thisexd = ext_defs; i < OSSL_NELEM(ext_defs); i++, thisexd++) {
+    const EXTENSION_DEFINITION** thisexd_ptr;
+    for (i = 0, thisexd_ptr = ordered_ext_defs; i < OSSL_NELEM(ext_defs); i++, thisexd_ptr++) {
+        thisexd = *thisexd_ptr;
+        size_t index_in_orig_ext_defs = thisexd - ext_defs;
+        
         EXT_RETURN (*construct)(SSL *s, WPACKET *pkt, unsigned int context,
                                 X509 *x, size_t chainidx);
         EXT_RETURN ret;
@@ -878,8 +966,10 @@ int tls_construct_extensions(SSL *s, WPACKET *pkt, unsigned int context,
                 && (context & (SSL_EXT_CLIENT_HELLO
                                | SSL_EXT_TLS1_3_CERTIFICATE_REQUEST
                                | SSL_EXT_TLS1_3_NEW_SESSION_TICKET)) != 0)
-            s->ext.extflags[i] |= SSL_EXT_FLAG_SENT;
+            s->ext.extflags[index_in_orig_ext_defs] |= SSL_EXT_FLAG_SENT;
     }
+    
+    OPENSSL_free(ordered_ext_defs);
 
     if (!WPACKET_close(pkt)) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_CONSTRUCT_EXTENSIONS,
@@ -1758,5 +1848,90 @@ static int final_psk(SSL *s, unsigned int context, int sent)
         return 0;
     }
 
+    return 1;
+}
+
+EXT_RETURN tls_construct_compress_certificate(SSL *s, WPACKET *pkt, unsigned int context,
+                                              X509 *x, size_t chainidx)
+{
+    if (s->ext.cert_compression_algorithms_len < 1)
+        return EXT_RETURN_NOT_SENT;
+    
+    if (!WPACKET_put_bytes_u16(pkt,
+                               TLSEXT_TYPE_compress_certificate)
+        /* Sub-packet certificate compression extension */
+        || !WPACKET_start_sub_packet_u16(pkt)
+        /* List of certificate compression algorithms */
+        || !WPACKET_start_sub_packet_u8(pkt)) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_CONSTRUCT_CTOS_ALPN,
+                 ERR_R_INTERNAL_ERROR); /* haven't figured out error handling, using the same marker as for ALPN -ER */
+        return EXT_RETURN_FAIL;
+    }
+    
+    for (size_t algo_idx = 0; algo_idx < s->ext.cert_compression_algorithms_len; algo_idx++) {
+        uint16_t algo = *(s->ext.cert_compression_algorithms + algo_idx);
+        if (!WPACKET_put_bytes_u16(pkt, algo)) {
+            SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_CONSTRUCT_CTOS_ALPN,
+                     ERR_R_INTERNAL_ERROR); /* haven't figured out error handling, using the same marker as for ALPN -ER */
+            return EXT_RETURN_FAIL;
+        }
+    }
+    
+    if (!WPACKET_close(pkt)
+        || !WPACKET_close(pkt)) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_CONSTRUCT_CTOS_ALPN,
+                 ERR_R_INTERNAL_ERROR); /* haven't figured out error handling, using the same marker as for ALPN -ER */
+        return EXT_RETURN_FAIL;
+    }
+    
+    return EXT_RETURN_SENT;
+}
+
+int tls_parse_compress_certificate(SSL *s, PACKET *pkt,
+                                             unsigned int context, X509 *x,
+                                             size_t chainidx)
+{
+    unsigned int algos_pkt_len;
+    if (!PACKET_get_1(pkt, &algos_pkt_len)) {
+        SSLfatal(s, SSL_AD_DECODE_ERROR,
+                 SSL_F_TLS_PARSE_CERTIFICATE_AUTHORITIES, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    size_t algos_len = algos_pkt_len / sizeof (uint16_t);
+    uint16_t *algos = OPENSSL_malloc(algos_pkt_len);
+    for (unsigned int algo_idx = 0; algo_idx < algos_len; algo_idx++) {
+        if (!PACKET_get_net_2(pkt, (unsigned int*) &algos[algo_idx])) {
+            SSLfatal(s, SSL_AD_DECODE_ERROR,
+                     SSL_F_TLS_PARSE_CERTIFICATE_AUTHORITIES, SSL_R_BAD_EXTENSION);
+            OPENSSL_free(algos);
+            return 0;
+        }
+    }
+    
+    if (PACKET_remaining(pkt) != 0) {
+        SSLfatal(s, SSL_AD_DECODE_ERROR,
+                 SSL_F_TLS_PARSE_CERTIFICATE_AUTHORITIES, SSL_R_BAD_EXTENSION);
+        OPENSSL_free(algos);
+        return 0;
+    }
+    
+    OPENSSL_free(s->ext.peer_cert_compression_algorithms);
+    s->ext.peer_cert_compression_algorithms = algos;
+    s->ext.peer_cert_compression_algorithms_len = algos_len;
+    
+    /* Choose whether to compress outbound certificate messages
+     * based on if the peer supports zlib */
+    int outbound_compression_enabled = 0;
+    uint16_t outbound_compression_algo = 0;
+    for (unsigned int algo_idx = 0; algo_idx < algos_len; algo_idx++) {
+        uint16_t algo = algos[algo_idx];
+        if (algo == 1 /* zlib */) {
+            outbound_compression_enabled = 1;
+            outbound_compression_algo = algo;
+        }
+    }
+    s->ext.outbound_compression_enabled = outbound_compression_enabled;
+    s->ext.outbound_compression_algo = outbound_compression_algo;
+    
     return 1;
 }

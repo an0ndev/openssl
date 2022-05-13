@@ -131,6 +131,9 @@ extern "C" {
 /* ExtensionType value from RFC7627 */
 # define TLSEXT_TYPE_extended_master_secret      23
 
+/* FAKESSL: RFC 8879 */
+#define TLSEXT_TYPE_compress_certificate 27
+
 /* ExtensionType value from RFC4507 */
 # define TLSEXT_TYPE_session_ticket              35
 
@@ -147,6 +150,9 @@ extern "C" {
 
 /* Temporary extension type */
 # define TLSEXT_TYPE_renegotiate                 0xff01
+
+/* FAKESSL: from https://boringssl.googlesource.com/boringssl/+/refs/heads/master/include/openssl/tls1.h */
+# define TLSEXT_TYPE_application_settings        17513
 
 # ifndef OPENSSL_NO_NEXTPROTONEG
 /* This is not an IANA defined extension number */
